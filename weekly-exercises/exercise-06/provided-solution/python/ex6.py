@@ -1,0 +1,1074 @@
+"""The example solutions for exercise 6."""
+
+# Copyright 2025 Tampere University
+# This notebook and software was developed for a Tampere University course COMP.CS.320.
+# This source code is licensed under the MIT license. See LICENSE in the exercise repository root directory.
+# Author(s): Ville Heikkilä (ville.heikkila@tuni.fi)
+
+# some imports that might be required in the tasks
+from functools import reduce
+from glob import glob
+from pathlib import Path
+
+from delta import configure_spark_with_delta_pip
+from delta.tables import DeltaTable
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
+from delta import configure_spark_with_delta_pip
+
+
+def main():
+    # COMP.CS.320 Data-Intensive Programming, Exercise 6
+    #
+    # This exercise demonstrates different file formats (CSV, Parquet, Delta)
+    # and some of the operations that can be used with them.
+    # The exercise is in three parts.
+    # - Tasks 1-4 concern reading and writing operations with CSV and Parquet
+    # - Tasks 5-7 introduces the Delta format
+    # - Task 8 is a theory question related to file formats.
+    #
+    # This is the Python version intended for local development.
+    #
+    # Each task is separated by the printTaskLine() function. Add your solutions to replace the question marks.
+    # There is test code and example output following most of the tasks that involve producing code.
+    #
+    # At the end of the file, there is a question regarding the use of AI or other collaboration when working the tasks.
+    # Please remember to answer the AI question. And finally, don't forget to submit your solutions to Moodle.
+
+
+    # Some resources that can help with the tasks in this exercise:
+    #
+    # - The tutorial notebook from our course: in the repository at: /ex1/Basics-of-using-Databricks-notebooks.ipynb
+    # - Chapter 4 and 9 (Section: Common DataFrames and Spark SQL Operations) in Learning Spark, 2nd Edition: https://learning.oreilly.com/library/view/learning-spark-2nd/9781492050032/
+    #     - There are additional code examples in the related GitHub repository: https://github.com/databricks/LearningSparkV2
+    #     - The book related notebooks can be imported to Databricks by choosing `import` in your workspace and using the URL
+    #       https://github.com/databricks/LearningSparkV2/blob/master/notebooks/LearningSparkv2.dbc
+    # - Apache Spark documentation on all available functions that can be used on DataFrames:
+    #   https://spark.apache.org/docs/3.5.6/sql-ref-functions.html
+    # The full Spark Scala functions API listing for the functions package might have some additional functions listed that
+    # have not been updated in the documentation: https://spark.apache.org/docs/3.5.6/api/scala/org/apache/spark/sql/functions$.html
+    # - Databricks documentation:
+    #   - What is Delta Lake?: https://docs.databricks.com/en/delta/index.html
+    #   - Delta Lake tutorial: https://docs.databricks.com/en/delta/tutorial.html
+    #   - Upsert into Delta Lake: https://docs.databricks.com/en/delta/merge.html#modify-all-unmatched-rows-using-merge
+    # - The Delta Spark, Python DeltaTable documentation: https://docs.delta.io/latest/api/python/spark/index.html
+
+
+    # In Databricks, the Spark session is created automatically, and you should not create it yourself.
+    builder: SparkSession.Builder = SparkSession.builder \
+        .appName("ex6-solution") \
+        .config("spark.driver.host", "localhost") \
+        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")  # ignore: type
+    spark: SparkSession = configure_spark_with_delta_pip(builder).getOrCreate()
+
+    # suppress informational log messages related to the inner working of Spark
+    spark.sparkContext.setLogLevel("WARN")
+
+    # reduce the number of shuffle partitions from the default 200 to have more efficient local execution
+    spark.conf.set("spark.sql.shuffle.partitions", 8)
+
+
+
+    # some helper functions used in this exercise
+
+    def getPathList(path: str) -> list[Path]:
+        return sorted([
+            Path(filename)
+            for filename in glob(f"{path}/*") + glob(f"{path}/.*")
+        ])
+
+    def sizeInKB(sizeInBytes: int) -> float:
+        return round(sizeInBytes/1024, 2)
+    def sizeInMB(sizeInBytes: int) -> float:
+        return round(sizeInBytes/1024/1024, 2)
+    def folderSizeInKB(filePath: str) -> float:
+        return sizeInKB(sum(file_info.stat().st_size for file_info in getPathList(filePath)))
+
+    # print the files and their sizes from the target path
+    def printStorage(path: str) -> None:
+        def getStorageSize(currentPath: str) -> float:
+            # using Databricks utilities to get the list of the files in the path
+            file_paths: list[Path] = getPathList(currentPath)
+            sizes: list[int] = []
+            for file_path in file_paths:
+                if file_path.is_dir():
+                    sizes.append(getStorageSize(str(file_path)))
+                else:
+                    print(f"{sizeInMB(file_path.stat().st_size)} MB --- {file_path}")
+                    sizes.append(file_path.stat().st_size)
+            return sum(sizes)
+
+        sizeInBytes: float = getStorageSize(path)
+        print(f"Total size: {sizeInMB(sizeInBytes)} MB")
+
+    # remove all files and folders from the target path
+    def cleanTargetFolder(path: str) -> None:
+        for file_path in getPathList(path):
+            if file_path.is_dir():
+                cleanTargetFolder(str(file_path))
+                file_path.rmdir()
+            else:
+                file_path.unlink()
+
+    # Print column types in a nice format
+    def printColumnTypes(inputDF: DataFrame) -> None:
+        maxColumnLength: int = max(len(column) for column in inputDF.columns)
+        for column_name, column_type in inputDF.dtypes:
+            print(f"{column_name}   {' ' * (maxColumnLength - len(column_name))}{column_type}")
+
+    # Returns a limited sample of the input data frame
+    def getTestDF(
+        inputDF: DataFrame,
+        ids: list[str] = ["Z1", "Z2"],
+        limitRows: int = 2,
+        idColumn: str = "ID",
+        nonOrigIdentifier: str = "_"
+    ) -> DataFrame:
+        origSample: DataFrame = inputDF \
+            .filter(~F.col(idColumn).contains(nonOrigIdentifier)) \
+            .limit(limitRows)
+        extraSample: DataFrame = reduce(
+            lambda df1, df2: df1.union(df2),
+            [inputDF.filter(F.col(idColumn).endswith(id)).limit(limitRows) for id in ids]
+        )
+
+        return origSample.union(extraSample)
+
+
+
+    printTaskLine(1)
+    # Task 1 - Read and write data in two formats
+    #
+    # In the weekly-exercises repository, the "data/ex6" folder contains data about car accidents in the USA.
+    # The same data is given in multiple formats, and it is a subset of the dataset in Kaggle:
+    #     https://www.kaggle.com/datasets/sobhanmoosavi/us-accidents](https://www.kaggle.com/datasets/sobhanmoosavi/us-accidents
+    #
+    # Part 1
+    #
+    # Read the data into data frames from both CSV and Parquet source format. The CSV source uses `|` as the column separator and contains header rows.
+    # Code for displaying the data and information about the source files is already included.
+    #
+    # Part 2
+    #
+    # Write the data from `df_csv` and `df_parquet` to the data folder in both CSV and Parquet formats.
+    # Note, since the data in both data frames is the same, you can to use either one as the source when writing it to a new folder (regardless of the target format).
+
+    source_path: str = "../../data/ex6/"
+    target_path: str = "data/"
+    data_name: str = "accidents"
+
+
+    source_csv_folder: str = source_path + f"{data_name}_csv"
+
+    # create and display the data from CSV source
+    df_csv: DataFrame = spark \
+        .read \
+        .option("header", True) \
+        .option("inferSchema", True) \
+        .option("sep", "|") \
+        .csv(source_csv_folder)
+
+    df_csv.show(5, False)
+
+
+    # Typically, a some more suitable file format would be used, like Parquet.
+    # With Parquet column format is stored in the file itself, so there is no need for schema inference or explicit schema.
+    source_parquet_folder: str = source_path + f"{data_name}_parquet"
+
+    # create and display the data from Parquet source
+    df_parquet: DataFrame = spark \
+        .read \
+        .parquet(source_parquet_folder)
+
+    df_parquet.show(5, False)
+
+
+    # print the list of source files for the different file formats
+    print("CSV files:")
+    printStorage(source_csv_folder)
+
+    print("\nParquet files:")
+    printStorage(source_parquet_folder)
+
+    # The schemas for both data frames should be the same (as long as both datasets have been correctly loaded)
+    print("===== CSV types =====")
+    printColumnTypes(df_csv)
+    print("\n===== Parquet types =====")
+    printColumnTypes(df_parquet)
+
+
+    # Example output:
+    # ===============
+    # (the same output for both data formats):
+    #
+    # +---------+-------------------+-------------------+---------------------------------------------------------------------------------+---------+------+-----+-------------+
+    # |ID       |Start_Time         |End_Time           |Description                                                                      |City     |County|State|Temperature_F|
+    # +---------+-------------------+-------------------+---------------------------------------------------------------------------------+---------+------+-----+-------------+
+    # |A-3558690|2016-01-14 20:18:33|2017-01-30 13:25:19|Closed at Fullerton Ave - Road closed due to accident. Roadwork. Lane blocked.   |Whitehall|Lehigh|PA   |31.0         |
+    # |A-3558700|2016-01-14 20:18:33|2017-01-30 13:34:02|Closed at Fullerton Ave - Road closed due to accident. Roadwork. Lane blocked.   |Whitehall|Lehigh|PA   |31.0         |
+    # |A-3558713|2016-01-14 20:18:33|2017-01-30 13:55:44|Closed at Fullerton Ave - Road closed due to accident. Roadwork. Open.           |Whitehall|Lehigh|PA   |31.0         |
+    # |A-3572241|2016-01-14 20:18:33|2017-02-17 23:22:00|Closed at Fullerton Ave - Road closed due to accident. Roadwork. Lane blocked.   |Whitehall|Lehigh|PA   |31.0         |
+    # |A-3572395|2016-01-14 20:18:33|2017-02-19 00:38:00|Closed at Fullerton Ave - Road closed due to accident. Roadwork. Traffic problem.|Whitehall|Lehigh|PA   |31.0         |
+    # +---------+-------------------+-------------------+---------------------------------------------------------------------------------+---------+------+-----+-------------+
+    # only showing top 5 rows
+    #
+    # and
+    #
+    # CSV files:
+    # 31.97 MB --- ../../data/ex6/accidents_csv/us_traffic_accidents.csv
+    # Total size: 31.97 MB
+    #
+    # Parquet files:
+    # 9.56 MB --- ../../data/ex6/accidents_parquet/us_traffic_accidents.parquet
+    # Total size: 9.56 MB
+    # ===== CSV types =====
+    # ID              string
+    # Start_Time      timestamp
+    # End_Time        timestamp
+    # Description     string
+    # City            string
+    # County          string
+    # State           string
+    # Temperature_F   double
+    #
+    # ===== Parquet types =====
+    # ID              string
+    # Start_Time      timestamp
+    # End_Time        timestamp
+    # Description     string
+    # City            string
+    # County          string
+    # State           string
+    # Temperature_F   double
+
+
+    # remove all previously written files from the target folder first
+    cleanTargetFolder(target_path)
+
+    # the target paths for both CSV and Parquet
+    target_file_csv: str = target_path + data_name + "_csv"
+    target_file_parquet: str = target_path + data_name + "_parquet"
+
+    # write the data from part 1 in CSV format to the path given by target_file_csv
+    df_csv \
+        .write \
+        .mode("overwrite") \
+        .option("header", "true") \
+        .option("sep", "|") \
+        .csv(target_file_csv)
+
+    # write the data from part 1 in Parquet format to the path given by target_file_parquet
+    df_parquet \
+        .write \
+        .mode("overwrite") \
+        .parquet(target_file_parquet)
+
+
+    # Check the written files:
+    printStorage(target_file_csv)
+    printStorage(target_file_parquet)
+
+    # Both with CSV and Parquet, the data can be divided into multiple files depending on how many workers were doing the writing.
+    # If a single file is needed, you can force the output into a single file with "coalesce(1)" before the write command
+    # This will make the writing less efficient, especially for larger datasets. (and is not needed in this exercise)
+    # There are some additional small metadata files (_SUCCESS, _committed, _started, .crc) that are not displayed in this output and that can be ignored in this exercise.
+
+
+    # Example output:
+    # ===============
+    # (note that the number of files might be different for you):
+    #
+    # 0.0 MB --- data/accidents_csv/._SUCCESS.crc
+    # 0.03 MB --- data/accidents_csv/.part-00000-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00001-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00002-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00003-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00004-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00005-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00006-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00007-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.0 MB --- data/accidents_csv/_SUCCESS
+    # 4.26 MB --- data/accidents_csv/part-00000-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # 4.26 MB --- data/accidents_csv/part-00001-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # 4.25 MB --- data/accidents_csv/part-00002-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # 4.25 MB --- data/accidents_csv/part-00003-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # 4.22 MB --- data/accidents_csv/part-00004-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # 4.21 MB --- data/accidents_csv/part-00005-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # 4.22 MB --- data/accidents_csv/part-00006-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # 4.19 MB --- data/accidents_csv/part-00007-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # Total size: 34.12 MB
+    # 0.0 MB --- data/accidents_parquet/._SUCCESS.crc
+    # 0.0 MB --- data/accidents_parquet/.part-00000-51d7a7a4-6897-40f4-8d12-870bfa05d995-c000.snappy.parquet.crc
+    # 0.07 MB --- data/accidents_parquet/.part-00001-51d7a7a4-6897-40f4-8d12-870bfa05d995-c000.snappy.parquet.crc
+    # 0.0 MB --- data/accidents_parquet/_SUCCESS
+    # 0.0 MB --- data/accidents_parquet/part-00000-51d7a7a4-6897-40f4-8d12-870bfa05d995-c000.snappy.parquet
+    # 9.55 MB --- data/accidents_parquet/part-00001-51d7a7a4-6897-40f4-8d12-870bfa05d995-c000.snappy.parquet
+    # Total size: 9.63 M
+
+
+
+    printTaskLine(2)
+    # Task 2 - Add new rows to storage
+    #
+    # - Create a new data frame based on the task 1 data that contains the `75` latest incidents (based on the starting time) in the city of `Los Angeles`.
+    #     - Append a postfix `_Z1` to the IDs of these Los Angeles incidents, e.g., `A-3666323` should be replaced with `A-3666323_Z1`.
+    # - Create a second new data frame based on the task 1 data that contains the `50` oldest incidents (based on the starting time) in the city of `Chicago`.
+    #     - Append a postfix `_Z1` also to the IDs of these Chicago incidents, e.g., `A-3499003` should be replaced with `A-3499003_Z1`.
+    # - Append the rows from both new data frames to the CSV storage and to the Parquet storage.<br>
+    #   I.e., write the new rows in append mode in CSV format to folder given by `target_file_csv` and in Parquet format to folder given by `target_file_parquet`.
+    # - Finally, read the data from the storages again to check that the appending was successful.
+
+    los_angeles_rows: int = 75
+    chicago_rows: int = 50
+
+    # New data frame with Los Angeles accidents that will be appended to the storage
+    df_new_rows_los_angeles: DataFrame = df_parquet \
+        .filter(F.col("City") == "Los Angeles") \
+        .orderBy(F.col("Start_Time").desc()) \
+        .limit(los_angeles_rows) \
+        .withColumn("ID", F.concat(F.col("ID"), F.lit("_Z1")))
+
+    # New data frame with Chicago accidents that will be appended to the storage
+    df_new_rows_chicago: DataFrame = df_parquet \
+        .filter(F.col("City") == "Chicago") \
+        .orderBy(F.col("Start_Time").asc()) \
+        .limit(chicago_rows) \
+        .withColumn("ID", F.concat(F.col("ID"), F.lit("_Z1")))
+
+
+    # print out the first 2 rows of the new data frames
+    df_new_rows_los_angeles.show(2)
+    df_new_rows_chicago.show(2)
+
+
+    # Both new data frames have the schema, combine them with union:
+    new_rows_df: DataFrame = df_new_rows_los_angeles.union(df_new_rows_chicago)
+
+    # Append the new rows to CSV storage:
+    # important to consistently use the same header and column separator options when using CSV storage
+    new_rows_df \
+        .write \
+        .mode("append") \
+        .option("header", "true") \
+        .option("sep", "|") \
+        .csv(target_file_csv)
+
+    # Append the new rows to Parquet storage:
+    new_rows_df \
+        .write \
+        .mode("append") \
+        .parquet(target_file_parquet)
+
+
+    # Read the merged data from the CSV files to check that the new rows have been stored
+    df_new_csv: DataFrame = spark \
+        .read \
+        .option("inferSchema", "true") \
+        .option("header", "true") \
+        .option("sep", "|") \
+        .csv(target_file_csv)
+
+    # Read the merged data from the Parquet files to check that the new rows have been stored
+    df_new_parquet: DataFrame = spark \
+        .read \
+        .parquet(target_file_parquet)
+
+
+    print(f"Old DF had {df_parquet.count()} rows and we are adding {los_angeles_rows + chicago_rows} rows ", end="")
+    print(f"=> we should have {df_parquet.count() + los_angeles_rows + chicago_rows} in the merged data.")
+    print("==========================================================")
+    print(f"Old     CSV DF had {df_csv.count()} rows and new DF has {df_new_csv.count()} rows.")
+    print(f"Old Parquet DF had {df_parquet.count()} rows and new DF has {df_new_parquet.count()} rows.")
+
+
+    # Example output:
+    # ===============
+    # +------------+-------------------+-------------------+--------------------+-----------+-----------+-----+-------------+
+    # |          ID|         Start_Time|           End_Time|         Description|       City|     County|State|Temperature_F|
+    # +------------+-------------------+-------------------+--------------------+-----------+-----------+-----+-------------+
+    # |A-3666323_Z1|2023-03-29 05:48:30|2023-03-29 07:55:41|San Diego Fwy S -...|Los Angeles|Los Angeles|   CA|         49.0|
+    # |A-3657191_Z1|2023-03-23 11:37:30|2023-03-23 13:45:00|CA-134 W - Ventur...|Los Angeles|Los Angeles|   CA|         58.0|
+    # +------------+-------------------+-------------------+--------------------+-----------+-----------+-----+-------------+
+    # only showing top 2 rows
+    # +------------+-------------------+-------------------+--------------------+-------+------+-----+-------------+
+    # |          ID|         Start_Time|           End_Time|         Description|   City|County|State|Temperature_F|
+    # +------------+-------------------+-------------------+--------------------+-------+------+-----+-------------+
+    # |A-3499003_Z1|2016-06-22 16:10:21|2016-06-22 22:10:21|Between 63rd St/E...|Chicago|  Cook|   IL|         73.0|
+    # |A-3501512_Z1|2016-06-30 00:35:46|2016-06-30 06:35:46|Closed between 87...|Chicago|  Cook|   IL|         54.9|
+    # +------------+-------------------+-------------------+--------------------+-------+------+-----+-------------+
+    # only showing top 2 rows
+    #
+    # and
+    #
+    # Old DF had 198082 rows and we are adding 125 rows => we should have 198207 in the merged data.
+    # ==========================================================
+    # Old     CSV DF had 198082 rows and new DF has 198207 rows.
+    # Old Parquet DF had 198082 rows and new DF has 198207 rows.
+
+
+
+    printTaskLine(3)
+    # Task 3 - Append modified rows
+    #
+    # In the previous task, appending new rows was successful because the new data had the same schema as the original data.
+    # In this task, we try to append data with a modified schema to the CSV and Parquet storages.
+    #
+    # - Create a new data frame based on all rows from `df_new_rows_los_angeles` and `df_new_rows_chicago` from task 2. The data frame should be modified in the following way:
+    #     - The values in the `ID` column should have a postfix `_Z2` instead of `_Z1`. E.g., `A-3877306_Z1` should be replaced with `A-3877306_Z2`.
+    #     - A new column `AddedColumn1` should be added with values `"prefix-CITY"` where `CITY` is replaced by the city of the incident.
+    #     - A new column `AddedColumn2` should be added with a constant value `"New column"`.
+    #     - The column `Temperature_F` should be renamed to `Temperature_C` and the Fahrenheit values should be transformed to Celsius values.
+    #         - Example of the temperature transformation: `49.0 °F` = `(49.0 - 32) / 9 * 5 °C` = `9.4444 °C`
+    #     - The column `Description` should be dropped.
+    # - Then append these modified rows to both the CSV storage and the Parquet storage.
+
+    # A new data frame with modified rows
+    df_modified: DataFrame = new_rows_df \
+        .withColumn("ID", F.replace(F.col("ID"), F.lit("Z1"), F.lit("Z2"))) \
+        .withColumn("AddedColumn1", F.concat(F.lit("prefix-"), F.col("City"))) \
+        .withColumn("AddedColumn2", F.lit("New column")) \
+        .withColumn("Temperature_F", (F.col("Temperature_F") - F.lit(32)) / F.lit(9) * F.lit(5)) \
+        .withColumnRenamed("Temperature_F", "Temperature_C") \
+        .drop("Description")
+
+
+    # Check the new data frame:
+    print(f"Rows in the new data frame: {df_modified.count()}")
+    print("Schema for the new data frame:")
+    printColumnTypes(df_modified)
+    print("The first 3 rows:")
+    df_modified.limit(3).show()
+
+
+    # Append the new modified rows to CSV storage:
+    df_modified \
+        .write \
+        .mode("append") \
+        .option("header", "true") \
+        .option("sep", "|") \
+        .csv(target_file_csv)
+
+    # Append the new modified rows to Parquet storage:
+    df_modified \
+        .write \
+        .mode("append") \
+        .parquet(target_file_parquet)
+
+
+    # Check the written files at this point:
+    printStorage(target_file_csv)
+    printStorage(target_file_parquet)
+
+
+
+    # Example output:
+    # ===============
+    # Rows in the new data frame: 125
+    # Schema for the new data frame:
+    # ID              string
+    # Start_Time      timestamp
+    # End_Time        timestamp
+    # City            string
+    # County          string
+    # State           string
+    # Temperature_C   double
+    # AddedColumn1    string
+    # AddedColumn2    string
+    # The first 3 rows:
+    # +------------+-------------------+-------------------+-----------+-----------+-----+------------------+------------------+------------+
+    # |          ID|         Start_Time|           End_Time|       City|     County|State|     Temperature_C|      AddedColumn1|AddedColumn2|
+    # +------------+-------------------+-------------------+-----------+-----------+-----+------------------+------------------+------------+
+    # |A-3666323_Z2|2023-03-29 05:48:30|2023-03-29 07:55:41|Los Angeles|Los Angeles|   CA| 9.444444444444445|prefix-Los Angeles|  New column|
+    # |A-3657191_Z2|2023-03-23 11:37:30|2023-03-23 13:45:00|Los Angeles|Los Angeles|   CA|14.444444444444445|prefix-Los Angeles|  New column|
+    # |A-3779912_Z2|2023-01-31 00:58:00|2023-01-31 02:16:34|Los Angeles|Los Angeles|   CA|  8.88888888888889|prefix-Los Angeles|  New column|
+    # +------------+-------------------+-------------------+-----------+-----------+-----+------------------+------------------+------------+
+    #
+    # and
+    #
+    # 0.0 MB --- data/accidents_csv/._SUCCESS.crc
+    # 0.0 MB --- data/accidents_csv/.part-00000-7781b491-6f8a-4ca9-8b7c-d2df4d91b49f-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00000-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.0 MB --- data/accidents_csv/.part-00000-d2041a2d-2c6c-4a37-ad1e-7e68a826e564-c000.csv.crc
+    # 0.0 MB --- data/accidents_csv/.part-00001-7781b491-6f8a-4ca9-8b7c-d2df4d91b49f-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00001-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.0 MB --- data/accidents_csv/.part-00001-d2041a2d-2c6c-4a37-ad1e-7e68a826e564-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00002-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00003-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00004-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00005-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00006-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.03 MB --- data/accidents_csv/.part-00007-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv.crc
+    # 0.0 MB --- data/accidents_csv/_SUCCESS
+    # 0.01 MB --- data/accidents_csv/part-00000-7781b491-6f8a-4ca9-8b7c-d2df4d91b49f-c000.csv
+    # 4.26 MB --- data/accidents_csv/part-00000-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # 0.01 MB --- data/accidents_csv/part-00000-d2041a2d-2c6c-4a37-ad1e-7e68a826e564-c000.csv
+    # 0.01 MB --- data/accidents_csv/part-00001-7781b491-6f8a-4ca9-8b7c-d2df4d91b49f-c000.csv
+    # 4.26 MB --- data/accidents_csv/part-00001-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # 0.01 MB --- data/accidents_csv/part-00001-d2041a2d-2c6c-4a37-ad1e-7e68a826e564-c000.csv
+    # 4.25 MB --- data/accidents_csv/part-00002-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # 4.25 MB --- data/accidents_csv/part-00003-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # 4.22 MB --- data/accidents_csv/part-00004-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # 4.21 MB --- data/accidents_csv/part-00005-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # 4.22 MB --- data/accidents_csv/part-00006-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # 4.19 MB --- data/accidents_csv/part-00007-8e5a5ff7-565d-4a6b-8b20-d167858a4dcd-c000.csv
+    # Total size: 34.16 MB
+    # 0.0 MB --- data/accidents_parquet/._SUCCESS.crc
+    # 0.0 MB --- data/accidents_parquet/.part-00000-02744483-1fc7-4943-966b-c2477e439117-c000.snappy.parquet.crc
+    # 0.0 MB --- data/accidents_parquet/.part-00000-51d7a7a4-6897-40f4-8d12-870bfa05d995-c000.snappy.parquet.crc
+    # 0.0 MB --- data/accidents_parquet/.part-00000-7d1c6e38-edce-4819-9bf0-db0c78335b63-c000.snappy.parquet.crc
+    # 0.0 MB --- data/accidents_parquet/.part-00001-02744483-1fc7-4943-966b-c2477e439117-c000.snappy.parquet.crc
+    # 0.07 MB --- data/accidents_parquet/.part-00001-51d7a7a4-6897-40f4-8d12-870bfa05d995-c000.snappy.parquet.crc
+    # 0.0 MB --- data/accidents_parquet/.part-00001-7d1c6e38-edce-4819-9bf0-db0c78335b63-c000.snappy.parquet.crc
+    # 0.0 MB --- data/accidents_parquet/_SUCCESS
+    # 0.01 MB --- data/accidents_parquet/part-00000-02744483-1fc7-4943-966b-c2477e439117-c000.snappy.parquet
+    # 0.0 MB --- data/accidents_parquet/part-00000-51d7a7a4-6897-40f4-8d12-870bfa05d995-c000.snappy.parquet
+    # 0.01 MB --- data/accidents_parquet/part-00000-7d1c6e38-edce-4819-9bf0-db0c78335b63-c000.snappy.parquet
+    # 0.01 MB --- data/accidents_parquet/part-00001-02744483-1fc7-4943-966b-c2477e439117-c000.snappy.parquet
+    # 9.55 MB --- data/accidents_parquet/part-00001-51d7a7a4-6897-40f4-8d12-870bfa05d995-c000.snappy.parquet
+    # 0.0 MB --- data/accidents_parquet/part-00001-7d1c6e38-edce-4819-9bf0-db0c78335b63-c000.snappy.parquet
+    # Total size: 9.65 M
+    #
+    # As before, the exact number of files could be different.
+
+
+
+    printTaskLine(4)
+    # Task 4 - Check the merged data
+    #
+    # In this task, we check the contents of the CSV and Parquet storages after the two data append operations, the new rows with the same schema in task 2, and the new rows with a modified schema in task 3.
+    #
+    # Part 1:
+    # - The task is to first write the code that loads the data from the storages again.
+    # - And then run the given test code that shows the number of rows, columns, schema, and some sample rows.
+    #
+    # Part 2:
+    # - Finally, answer the questions in the at the end of this task.
+
+    # Read in the CSV data again from the CSV storage: target_file_csv
+    modified_csv_df: DataFrame = spark \
+        .read \
+        .option("header", "true") \
+        .option("inferSchema", "true") \
+        .option("sep", "|") \
+        .csv(target_file_csv)
+
+
+    # CSV should have been broken in some way
+    print("===== CSV storage =====")
+    print(f"The number of rows should be correct: {modified_csv_df.count()} (i.e., {df_csv.count()}+2*{los_angeles_rows + chicago_rows})")
+    print(f"However, the original data had {len(df_csv.columns)} columns, inserted data had {len(df_modified.columns)} columns. Afterwards we have {len(modified_csv_df.columns)} columns while we should have {len(df_csv.columns) + 3} distinct columns.")
+
+    # print the schema of the CSV data frame
+    printColumnTypes(modified_csv_df)
+
+    # show two example rows from each addition
+    getTestDF(modified_csv_df).show()
+
+
+    # Read in the Parquet data again from the Parquet storage: target_file_parquet
+    modified_parquet_df: DataFrame = spark \
+        .read \
+        .parquet(target_file_parquet)
+
+
+    # Parquet should also be broken in some way
+    print("===== Parquet storage =====")
+    print(f"The count for number of rows might be wrong: {df_parquet.count()} (should be: {df_parquet.count()}+2*{los_angeles_rows + chicago_rows})")
+    print(f"Actually all {df_parquet.count()+2*(los_angeles_rows + chicago_rows)} rows should be included but the 2 conflicting schemas can cause the count to be incorrect.")
+    print(f"The original data had {len(df_parquet.columns)} columns, inserted data had {len(df_modified.columns)} columns. Afterwards we have {len(modified_parquet_df.columns)} columns while we should have {len(df_parquet.columns) + 3} distinct columns.")
+
+    # Unlike the CSV case, the data types for the columns have not been affected. But some columns are just ignored.
+    printColumnTypes(modified_parquet_df)
+
+    # show two example rows from each addition
+    getTestDF(modified_parquet_df).show()
+
+
+
+    # Example output:
+    # ===============
+    # For CSV:
+    #
+    # The number of rows should be correct: 198332 (i.e., 198082+2*125)
+    # However, the original data had 8 columns, inserted data had 9 columns. Afterwards we have 8 columns while we should have 11 distinct columns.
+    # ID              string
+    # Start_Time      string
+    # End_Time        string
+    # Description     string
+    # City            string
+    # County          string
+    # State           string
+    # Temperature_F   string
+    # +------------+--------------------+--------------------+--------------------+-----------+-----------+------------------+------------------+
+    # |          ID|          Start_Time|            End_Time|         Description|       City|     County|             State|     Temperature_F|
+    # +------------+--------------------+--------------------+--------------------+-----------+-----------+------------------+------------------+
+    # |   A-3558690|2016-01-14T22:18:...|2017-01-30T15:25:...|Closed at Fullert...|  Whitehall|     Lehigh|                PA|              31.0|
+    # |   A-3558700|2016-01-14T22:18:...|2017-01-30T15:34:...|Closed at Fullert...|  Whitehall|     Lehigh|                PA|              31.0|
+    # |A-3666323_Z1|2023-03-29T08:48:...|2023-03-29T10:55:...|San Diego Fwy S -...|Los Angeles|Los Angeles|                CA|              49.0|
+    # |A-3657191_Z1|2023-03-23T13:37:...|2023-03-23T15:45:...|CA-134 W - Ventur...|Los Angeles|Los Angeles|                CA|              58.0|
+    # |A-3666323_Z2|2023-03-29T08:48:...|2023-03-29T10:55:...|         Los Angeles|Los Angeles|         CA| 9.444444444444445|prefix-Los Angeles|
+    # |A-3657191_Z2|2023-03-23T13:37:...|2023-03-23T15:45:...|         Los Angeles|Los Angeles|         CA|14.444444444444445|prefix-Los Angeles|
+    # +------------+--------------------+--------------------+--------------------+-----------+-----------+------------------+------------------+
+    #
+    # and for Parquet (alternative 1):
+    #
+    # ===== Parquet storage =====
+    # The count for number of rows might be wrong: 198082 (should be: 198082+2*125)
+    # Actually all 198332 rows should be included but the 2 conflicting schemas can cause the count to be incorrect.
+    # The original data had 8 columns, inserted data had 9 columns. Afterwards we have 8 columns while we should have 11 distinct columns.
+    # ID              string
+    # Start_Time      timestamp
+    # End_Time        timestamp
+    # Description     string
+    # City            string
+    # County          string
+    # State           string
+    # Temperature_F   double
+    # +------------+-------------------+-------------------+--------------------+-----------+-----------+-----+-------------+
+    # |          ID|         Start_Time|           End_Time|         Description|       City|     County|State|Temperature_F|
+    # +------------+-------------------+-------------------+--------------------+-----------+-----------+-----+-------------+
+    # |   A-3558690|2016-01-14 20:18:33|2017-01-30 13:25:19|Closed at Fullert...|  Whitehall|     Lehigh|   PA|         31.0|
+    # |   A-3558700|2016-01-14 20:18:33|2017-01-30 13:34:02|Closed at Fullert...|  Whitehall|     Lehigh|   PA|         31.0|
+    # |A-3666323_Z1|2023-03-29 05:48:30|2023-03-29 07:55:41|San Diego Fwy S -...|Los Angeles|Los Angeles|   CA|         49.0|
+    # |A-3657191_Z1|2023-03-23 11:37:30|2023-03-23 13:45:00|CA-134 W - Ventur...|Los Angeles|Los Angeles|   CA|         58.0|
+    # |A-3666323_Z2|2023-03-29 05:48:30|2023-03-29 07:55:41|                NULL|Los Angeles|Los Angeles|   CA|         NULL|
+    # |A-3657191_Z2|2023-03-23 11:37:30|2023-03-23 13:45:00|                NULL|Los Angeles|Los Angeles|   CA|         NULL|
+    # +------------+-------------------+-------------------+--------------------+-----------+-----------+-----+-------------+
+    #
+    # Parquet (alternative 2):
+    #
+    # ===== Parquet storage =====
+    # The count for number of rows might be wrong: 198082 (should be: 198082+2*125)
+    # Actually all 198332 rows should be included but the 2 conflicting schemas can cause the count to be incorrect.
+    # The original data had 8 columns, inserted data had 9 columns. Afterwards we have 9 columns while we should have 11 distinct columns.
+    # ID              string
+    # Start_Time      timestamp
+    # End_Time        timestamp
+    # City            string
+    # County          string
+    # State           string
+    # Temperature_C   double
+    # AddedColumn1    string
+    # AddedColumn2    string
+    # +------------+-------------------+-------------------+-----------+-----------+-----+------------------+------------------+------------+
+    # |          ID|         Start_Time|           End_Time|       City|     County|State|     Temperature_C|      AddedColumn1|AddedColumn2|
+    # +------------+-------------------+-------------------+-----------+-----------+-----+------------------+------------------+------------+
+    # |   A-3558690|2016-01-14 20:18:33|2017-01-30 13:25:19|  Whitehall|     Lehigh|   PA|              NULL|              NULL|        NULL|
+    # |   A-3558700|2016-01-14 20:18:33|2017-01-30 13:34:02|  Whitehall|     Lehigh|   PA|              NULL|              NULL|        NULL|
+    # |A-3666323_Z1|2023-03-29 05:48:30|2023-03-29 07:55:41|Los Angeles|Los Angeles|   CA|              NULL|              NULL|        NULL|
+    # |A-3657191_Z1|2023-03-23 11:37:30|2023-03-23 13:45:00|Los Angeles|Los Angeles|   CA|              NULL|              NULL|        NULL|
+    # |A-3666323_Z2|2023-03-29 05:48:30|2023-03-29 07:55:41|Los Angeles|Los Angeles|   CA| 9.444444444444445|prefix-Los Angeles|  New column|
+    # |A-3657191_Z2|2023-03-23 11:37:30|2023-03-23 13:45:00|Los Angeles|Los Angeles|   CA|14.444444444444445|prefix-Los Angeles|  New column|
+    # +------------+-------------------+-------------------+-----------+-----------+-----+------------------+------------------+------------+
+
+
+    # - **Did you get similar output for the data in CSV storage? If not, what was the difference?**
+    #     - The same output.
+    #
+    # - **What is your explanation/guess for why the CSV seems broken and the schema cannot be inferred anymore?**
+    #     - Likely the first CSV file that is read will determine the column names and their number. Spark then assumes that all files have the columns in the same order. Thus, the City has been put into the Description column since the description was not included in the modified data. This results in for example the temperature column having string values and it cannot be determined to be a number anymore. This kind of result is really broken, and thus when using CSV format you have to be very careful to always use data in the same schema, as well as always consistent reading/writing options for the header as well as the column separator.
+    #
+    # - **Did you get similar output for the data in Parquet storage, and which of the 2 alternatives? If not, what was the difference?**
+    #     - The same output, depending on the run, both alternatives appeared.
+    #
+    # - **What is your explanation/guess for why not all 11 distinct columns are included in the data frame in the Parquet case?**
+    #     - Something similar to the CSV case might be happening here. The first parquet file that is loaded likely dominates the used schema and only those columns will be included in the loaded data frame. However, Parquet does keep each column in their correct place and adds NULL values to those cells that were not provided by the source data. Clearly, also with parquet one needs to be careful to only append and merge data that is given in the common schema.
+
+
+
+    printTaskLine(5)
+    # ask 5 - Delta - Reading and writing data
+    #
+    # Delta, https://docs.databricks.com/en/delta/index.html, tables are a storage format that are more advanced. They can be used somewhat like databases.
+    # This is not native in Spark, but open format, which is more and more commonly used.
+    #
+    # Delta is stricter with data. We cannot, for example, have whitespace in column names, as you can have in Parquet and CSV.
+    # However, in this exercise, the example data is given with column names where these additional requirements have already been fulfilled.
+    # And thus, you don't have to worry about them in this exercise.
+    #
+    # Delta technically looks more or less like Parquet with some additional metadata files.
+    #
+    # The task
+    # - In this task, read the source data given in Delta format into a data frame.
+    # - And then write a copy of the data into the Students container to allow modifications in the following tasks.
+
+    source_delta_folder: str = source_path + f"{data_name}_delta"
+
+    # Read the original data in Delta format to a data frame
+    df_delta: DataFrame = spark \
+        .read \
+        .format("delta") \
+        .load(source_delta_folder)
+
+    print("The original data from the shared container:")
+    print(f"== Number or rows: {df_delta.count()}")
+    print("== Columns:")
+    printColumnTypes(df_delta)
+    print("== Storage files:")
+    printStorage(source_delta_folder)
+
+
+    target_file_delta: str = target_path + data_name + "_delta"
+
+    # write the data from df_delta using the Delta format to the path given by target_file_delta
+    df_delta \
+        .write \
+        .format("delta") \
+        .mode("overwrite") \
+        .save(target_file_delta)
+
+
+    # Check the written files:
+    print("== Target files:")
+    printStorage(target_file_delta)
+
+
+    # Example output:
+    # ===============
+    # The original data from the shared container:
+    # == Number or rows: 198082
+    # == Columns:
+    # ID              string
+    # Start_Time      timestamp
+    # End_Time        timestamp
+    # Description     string
+    # City            string
+    # County          string
+    # State           string
+    # Temperature_F   double
+    # == Storage files:
+    # 0.0 MB --- ../../data/ex6/accidents_delta/_delta_log/00000000000000000000.crc
+    # 0.0 MB --- ../../data/ex6/accidents_delta/_delta_log/00000000000000000000.json
+    # 9.56 MB --- ../../data/ex6/accidents_delta/part-00000-35a096d7-a0ee-439a-85e0-aa78e2935f39-c000.snappy.parquet
+    # Total size: 9.56 MB
+    # == Target files:
+    # 0.0 MB --- data/accidents_delta/.part-00000-9d280247-9497-4f98-ac05-c6df9d4d7a16-c000.snappy.parquet.crc
+    # 0.07 MB --- data/accidents_delta/.part-00001-6f43187d-c7a2-4677-ba02-693c9400a00e-c000.snappy.parquet.crc
+    # 0.0 MB --- data/accidents_delta/_delta_log/.00000000000000000000.crc.crc
+    # 0.0 MB --- data/accidents_delta/_delta_log/.00000000000000000000.json.crc
+    # 0.0 MB --- data/accidents_delta/_delta_log/00000000000000000000.crc
+    # 0.0 MB --- data/accidents_delta/_delta_log/00000000000000000000.json
+    # 0.0 MB --- data/accidents_delta/part-00000-9d280247-9497-4f98-ac05-c6df9d4d7a16-c000.snappy.parquet
+    # 9.55 MB --- data/accidents_delta/part-00001-6f43187d-c7a2-4677-ba02-693c9400a00e-c000.snappy.parquet
+    # Total size: 9.63 MB
+
+
+
+    printTaskLine(6)
+    # Task 6 - Delta - Appending data and checking the results
+    #
+    # - Append the new rows using the same schema, `df_new_rows_los_angeles` and `df_new_rows_chicago` from task 2, to the Delta storage.
+    # - Append the new rows using the modified schema, `df_modified` from task 3, to the Delta storage.
+    # - Then, read the merged data and study whether the result with Delta is correct without lost or invalid data.
+
+    # Append the new rows using the same schema, from df_new_rows_los_angeles and df_new_rows_chicago, to the Delta storage:
+    new_rows_df \
+        .write \
+        .format("delta") \
+        .mode("append") \
+        .save(target_file_delta)
+
+
+    # By default, Delta is similar to Parquet in that it assumes the data schema to stay the same. However, we can enable it to handle schema modifications.
+    spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", True)
+
+
+    # Append the new rows using the modified schema, df_modified, to the Delta storage:
+    df_modified \
+        .write \
+        .format("delta") \
+        .mode("append") \
+        .save(target_file_delta)
+
+
+    # Read the merged data from Delta storage to check that the new rows have been stored
+    modified_delta_df: DataFrame = spark \
+        .read \
+        .format("delta") \
+        .load(target_file_delta)
+
+
+    print(f"The number of rows should be correct: {modified_delta_df.count()} (i.e., {df_delta.count()}+2*{los_angeles_rows + chicago_rows})")
+    print(f"The original data had {len(df_delta.columns)} columns, inserted data had {len(df_modified.columns)} columns. Afterwards we have {len(modified_delta_df.columns)} columns which should match the expected {len(df_delta.columns) + 3} distinct columns.")
+    print("Delta should handle the merge perfectly. The columns which were not given values are available with NULL values.")
+
+    # show two example rows from each addition
+    getTestDF(modified_delta_df).show()
+
+
+    # Example output:
+    # ===============
+    # The number of rows should be correct: 198332 (i.e., 198082+2*125)
+    # The original data had 8 columns, inserted data had 9 columns. Afterwards we have 11 columns which should match the expected 11 distinct columns.
+    # Delta should handle the merge perfectly. The columns which were not given values are available with NULL values.
+    # +------------+-------------------+-------------------+--------------------+-----------+-----------+-----+-------------+------------------+------------------+------------+
+    # |          ID|         Start_Time|           End_Time|         Description|       City|     County|State|Temperature_F|     Temperature_C|      AddedColumn1|AddedColumn2|
+    # +------------+-------------------+-------------------+--------------------+-----------+-----------+-----+-------------+------------------+------------------+------------+
+    # |   A-3558690|2016-01-14 20:18:33|2017-01-30 13:25:19|Closed at Fullert...|  Whitehall|     Lehigh|   PA|         31.0|              NULL|              NULL|        NULL|
+    # |   A-3558700|2016-01-14 20:18:33|2017-01-30 13:34:02|Closed at Fullert...|  Whitehall|     Lehigh|   PA|         31.0|              NULL|              NULL|        NULL|
+    # |A-3666323_Z1|2023-03-29 05:48:30|2023-03-29 07:55:41|San Diego Fwy S -...|Los Angeles|Los Angeles|   CA|         49.0|              NULL|              NULL|        NULL|
+    # |A-3657191_Z1|2023-03-23 11:37:30|2023-03-23 13:45:00|CA-134 W - Ventur...|Los Angeles|Los Angeles|   CA|         58.0|              NULL|              NULL|        NULL|
+    # |A-3666323_Z2|2023-03-29 05:48:30|2023-03-29 07:55:41|                NULL|Los Angeles|Los Angeles|   CA|         NULL| 9.444444444444445|prefix-Los Angeles|  New column|
+    # |A-3657191_Z2|2023-03-23 11:37:30|2023-03-23 13:45:00|                NULL|Los Angeles|Los Angeles|   CA|         NULL|14.444444444444445|prefix-Los Angeles|  New column|
+    # +------------+-------------------+-------------------+--------------------+-----------+-----------+-----+-------------+------------------+------------------+------------+
+
+
+
+    printTaskLine(7)
+    # Task 7 - Delta - Full modifications
+    #
+    # With CSV or Parquet, editing existing values is not possible without overwriting the entire dataset.
+    #
+    # Previously, we only added new lines. This way of working only supports adding new data.
+    # It does **not** support modifying existing data: updating values or deleting rows.
+    # (We could do that manually by adding a primary key and timestamp and always searching for the newest value.)
+    #
+    # Nevertheless, Delta tables take care of this and many more itself.
+    #
+    # This task is divided into four parts, with separate instructions for each cell.
+    # The first three parts ask for some code, and the final part is to run the given test code.
+    #
+    # Part 1: In the following cell, add the code to write the `df_delta_small` into Delta storage.
+
+    # Let us first save a smaller data so that it is easier to see what is happening
+    delta_table_file: str = target_path + data_name + "_deltatable_small"
+
+    # create a small 6 row data frame with only 5 columns
+    df_delta_small: DataFrame = getTestDF(modified_delta_df, ["Z1"], 3) \
+        .drop("Description", "End_Time", "County", "AddedColumn1", "AddedColumn2")
+
+
+    # Write the new small data frame to storage in Delta format to path based on delta_table_file
+    df_delta_small \
+        .write \
+        .format("delta") \
+        .mode("overwrite") \
+        .save(delta_table_file)
+
+
+    # Create Delta table based on your target folder
+    deltatable: DeltaTable = DeltaTable.forPath(spark, delta_table_file)
+
+    # Show the data originally, before the merge that is done in the next part
+    print(f"== Originally, the size of Delta storage is {folderSizeInKB(delta_table_file)} kB and contains {deltatable.toDF().count()} rows.")
+    deltatable.toDF().sort(F.desc("Start_Time")).show()
+
+
+    # Delta tables are more like database type tables. We define them based on data and modify the table itself.
+    #
+    # We do this by telling Delta what is the primary key of the data. After this we tell it to "merge" new data to the old one.
+    # If primary key matches, we update the information. If primary key is new, add a row.
+    #
+    # Part 2:
+    # - In the following cell, add the code to update the `deltatable` with the given updates in `df_delta_update`.
+    #   The rows should be updated when the `ID` columns match. And if the id from the update is a new one, a new row should be inserted into the `deltatable`.
+
+    # create a 5 row data frame with the same columns with updated values for the temperature
+    df_delta_update: DataFrame = df_new_rows_los_angeles \
+        .limit(5) \
+        .drop("Description", "End_Time", "County") \
+        .withColumn("Temperature_F", F.round(F.rand(seed=1) * 100, 1)) \
+
+
+    # code for updating the deltatable with df_delta_update
+    deltatable \
+        .alias("orig") \
+        .merge(df_delta_update.alias("updates"), "orig.ID = updates.ID") \
+        .whenMatchedUpdateAll() \
+        .whenNotMatchedInsertAll() \
+        .execute()
+
+
+    # Show the data after the merge
+    print(f"== After merge, the size of Delta storage is {folderSizeInKB(delta_table_file)} kB and contains {deltatable.toDF().count()} rows.")
+    deltatable.toDF().sort(F.desc("Start_Time")).show()
+
+
+    # Part 3: As a second modification to the test data, do the following modifications to the `deltatable`:
+    # - Fill out the proper temperature values given in Celsius degrees for column `Temperature_C` for all incidents in the delta table.
+    # - Remove all rows where the temperature in Celsius is below `-12 °C`.
+
+    df_delta_second_update: DataFrame = deltatable.toDF() \
+        .withColumn(
+            "Temperature_C",
+            F.round((F.col("Temperature_F") - F.lit(32)) / F.lit(9) * F.lit(5), 1)
+        )
+
+
+    # code for updating the deltatable with the Celsius temperature values
+    deltatable \
+        .alias("orig") \
+        .merge(df_delta_second_update.alias("updates"), "orig.ID = updates.ID") \
+        .whenMatchedUpdateAll() \
+        .execute()
+
+    # code for removing rows where the temperature is below -12 Celsius degrees from the deltatable
+    deltatable.delete(F.col("Temperature_C") < -12)
+
+
+    # Show the data after the second update
+    print(f"== After the second update, the size of Delta storage is {folderSizeInKB(delta_table_file)} kB and contains {deltatable.toDF().count()} rows.")
+    deltatable.toDF().sort(F.desc("Start_Time")).show()
+
+
+    # Part 4: Run the following cell as a demonstration on how the additional and unused data can be removed from the storage.
+    #
+    # The modifications and removals are actually physically done only once something like the vacuuming shown below is done.
+    # Before that, the original data still exist in the original files.
+
+
+    # We can get rid of additional or unused data from the storage by vacuuming
+
+    # you can print the files before vacuuming by uncommenting the following
+    # printStorage(delta_table_file)
+
+    # Typically we do not want to vacuum all the data, only data older than 30 days or so.
+    # We need to tell Delta that we really want to do something stupid
+    spark.conf.set("spark.databricks.delta.retentionDurationCheck.enabled", False)
+    print(f"== Before vacuum, the size of Delta storage is {folderSizeInKB(delta_table_file)} kB.")
+    deltatable.vacuum(0)
+    print(f"== After vacuum, the size of Delta storage is {folderSizeInKB(delta_table_file)} kB.")
+
+    # you can print the files after vacuuming by uncommenting the following
+    # (there should be more metadata files (JSON and CRC), but the actual data (Parquet files) are truncated)
+    # printStorage(delta_table_file)
+
+    # the vacuuming should not change the actual data
+    deltatable.toDF().sort(F.desc("Start_Time")).show()
+
+
+    # Example output:
+    # ===============
+    # The numbers for the files sizes might not match exactly.
+    #
+    # == Originally, the size of Delta storage is 7.68 kB and contains 6 rows.
+    # +------------+-------------------+-----------+-----+-------------+-------------+
+    # |          ID|         Start_Time|       City|State|Temperature_F|Temperature_C|
+    # +------------+-------------------+-----------+-----+-------------+-------------+
+    # |A-3666323_Z1|2023-03-29 05:48:30|Los Angeles|   CA|         49.0|         NULL|
+    # |A-3657191_Z1|2023-03-23 11:37:30|Los Angeles|   CA|         58.0|         NULL|
+    # |A-3779912_Z1|2023-01-31 00:58:00|Los Angeles|   CA|         48.0|         NULL|
+    # |   A-3558690|2016-01-14 20:18:33|  Whitehall|   PA|         31.0|         NULL|
+    # |   A-3558700|2016-01-14 20:18:33|  Whitehall|   PA|         31.0|         NULL|
+    # |   A-3558713|2016-01-14 20:18:33|  Whitehall|   PA|         31.0|         NULL|
+    # +------------+-------------------+-----------+-----+-------------+-------------+
+    #
+    # and
+    #
+    # == After merge, the size of Delta storage is 9.58 kB and contains 8 rows.
+    # +------------+-------------------+-----------+-----+-------------+-------------+
+    # |          ID|         Start_Time|       City|State|Temperature_F|Temperature_C|
+    # +------------+-------------------+-----------+-----+-------------+-------------+
+    # |A-3666323_Z1|2023-03-29 05:48:30|Los Angeles|   CA|         63.6|         NULL|
+    # |A-3657191_Z1|2023-03-23 11:37:30|Los Angeles|   CA|         59.9|         NULL|
+    # |A-3779912_Z1|2023-01-31 00:58:00|Los Angeles|   CA|         13.5|         NULL|
+    # |A-5230341_Z1|2023-01-30 03:07:00|Los Angeles|   CA|          7.7|         NULL|
+    # |A-4842824_Z1|2023-01-29 22:11:00|Los Angeles|   CA|         85.4|         NULL|
+    # |   A-3558690|2016-01-14 20:18:33|  Whitehall|   PA|         31.0|         NULL|
+    # |   A-3558700|2016-01-14 20:18:33|  Whitehall|   PA|         31.0|         NULL|
+    # |   A-3558713|2016-01-14 20:18:33|  Whitehall|   PA|         31.0|         NULL|
+    # +------------+-------------------+-----------+-----+-------------+-------------+
+    #
+    # and
+    #
+    # == After the second update, the size of Delta storage is 15.45 kB and contains 7 rows.
+    # +------------+-------------------+-----------+-----+-------------+-------------+
+    # |          ID|         Start_Time|       City|State|Temperature_F|Temperature_C|
+    # +------------+-------------------+-----------+-----+-------------+-------------+
+    # |A-3666323_Z1|2023-03-29 05:48:30|Los Angeles|   CA|         63.6|         17.6|
+    # |A-3657191_Z1|2023-03-23 11:37:30|Los Angeles|   CA|         59.9|         15.5|
+    # |A-3779912_Z1|2023-01-31 00:58:00|Los Angeles|   CA|         13.5|        -10.3|
+    # |A-4842824_Z1|2023-01-29 22:11:00|Los Angeles|   CA|         85.4|         29.7|
+    # |   A-3558690|2016-01-14 20:18:33|  Whitehall|   PA|         31.0|         -0.6|
+    # |   A-3558700|2016-01-14 20:18:33|  Whitehall|   PA|         31.0|         -0.6|
+    # |   A-3558713|2016-01-14 20:18:33|  Whitehall|   PA|         31.0|         -0.6|
+    # +------------+-------------------+-----------+-----+-------------+-------------+
+    #
+    # and finally
+    #
+    # == Before vacuum, the size of Delta storage is 15.45 kB.
+    # Deleted 4 files and directories in a total of 1 directories.
+    # == After vacuum, the size of Delta storage is 7.89 kB.
+    # +------------+-------------------+-----------+-----+-------------+-------------+
+    # |          ID|         Start_Time|       City|State|Temperature_F|Temperature_C|
+    # +------------+-------------------+-----------+-----+-------------+-------------+
+    # |A-3666323_Z1|2023-03-29 05:48:30|Los Angeles|   CA|         63.6|         17.6|
+    # |A-3657191_Z1|2023-03-23 11:37:30|Los Angeles|   CA|         59.9|         15.5|
+    # |A-3779912_Z1|2023-01-31 00:58:00|Los Angeles|   CA|         13.5|        -10.3|
+    # |A-4842824_Z1|2023-01-29 22:11:00|Los Angeles|   CA|         85.4|         29.7|
+    # |   A-3558690|2016-01-14 20:18:33|  Whitehall|   PA|         31.0|         -0.6|
+    # |   A-3558700|2016-01-14 20:18:33|  Whitehall|   PA|         31.0|         -0.6|
+    # |   A-3558713|2016-01-14 20:18:33|  Whitehall|   PA|         31.0|         -0.6|
+    # +------------+-------------------+-----------+-----+-------------+-------------+
+
+
+
+    printTaskLine(8)
+    # Task 8 - Theory question
+    #
+    # Using your own words, answer the following questions:
+    #
+    # 1. CSV and Parquet files have been used as the data sources in several exercises.
+    #     - What benefits (if any) do you get when the data is stored in Parquet format instead of CSV format?
+    #     - Are there drawbacks of using Parquet format over CSV format? When would you choose CSV over Parquet?
+    # 2. This exercise considered data in CSV, Parquet, and Delta format.
+    #     - What other file formats are supported by Spark?
+    #     - Can you use other data sources than files with Spark?<br>
+    #       If yes, give some source examples that can be used with Spark.
+    #
+    # Extensive answers are not required here.
+    # If your answers do not fit into one screen, you have likely written more than what was expected.
+
+    # CSV vs. Parquet
+    # - Parquet format is more efficient than CSV because it uses columnar storage and compression,
+    #   which leads to faster reads and smaller file sizes, especially for large datasets.
+    # - CSV format is commonly supported by almost any applications. Their content can easily be
+    #   inspected or edited manually by any text editor or applications like Excel.
+    #   Parquet format does not have similar support, and to inspect the contents you have more limited options.
+    # - In general, with any large datasets Parquet should be preferred over CSV. With small datasets,
+    #   or when the data needs to be used with non-Spark tools, CSV format is a viable option.
+    #
+    # 2. Other formats
+    # - File formats supported by Spark natively include raw text, JSON, ORC, Avro, and XML (the last starting from version 4.0.0).
+    #   Other formats like Delta Lake have support through additional libraries.
+    #   Most commonly used file formats have support either natively or through libraries.
+    # - Yes, Spark can use other data sources besides files, such as relational databases (e.g., PostgreSQL, MySQL),
+    #   NoSQL databases (e.g., Cassandra, MongoDB), and cloud storage systems (e.g., Azure Blob Storage, Amazon S3).
+
+
+
+    printAIQuestionTaskLine()
+    # Use of AI and collaboration
+    #
+    # Using AI and collaborating with other students is allowed when doing the weekly exercises.
+    # However, the AI use and collaboration should be documented.
+    #
+    # - Did you use AI tools while doing this exercise?
+    #   - Did they help? And how did they help?
+    # - Did you work with other students to complete the tasks?
+    #   - Only extensive collaboration is expected to be reported. If you only got help
+    #     for a couple of the tasks, you don't need to report it here.
+
+    # AI tool usage and other collaboration should be mentioned here.
+
+
+
+    # Typically, at the end you would stop the Spark session to free up resources.
+    # DO NOT do this in Databricks! It will restart the entire cluster for all users.
+    # (that is why it is commented out here too, getting to the end will stop the session automatically)
+    # spark.stop()
+
+
+
+# Helper function to separate the task outputs from each other
+def printTaskLine(taskNumber: int) -> None:
+    print(f"======\nTask {taskNumber}\n======")
+
+def printAIQuestionTaskLine() -> None:
+    print("======\nAI and collaboration\n======")
+
+
+
+if __name__ == "__main__":
+    main()

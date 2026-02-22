@@ -1,0 +1,330 @@
+"""The tasks for exercise 2."""
+
+# Copyright 2025 Tampere University
+# This notebook and software was developed for a Tampere University course COMP.CS.320.
+# This source code is licensed under the MIT license. See LICENSE in the exercise repository root directory.
+# Author(s): Ville Heikkilä (ville.heikkila@tuni.fi)
+
+# some imports that might be required in the tasks
+from pyspark.sql import functions as F
+from pyspark.sql import DataFrame
+from pyspark.sql import Row
+from pyspark.sql import SparkSession
+
+
+def main():
+    # COMP.CS.320 Data-Intensive Programming, Exercise 2
+    #
+    # This exercise contains basic tasks of data processing using Spark and DataFrames.
+    # The last task is a theory question related to the first lecture.
+    #
+    # This is the Python version intended for local development.
+    #
+    # Each task is separated by the printTaskLine() function. Add your solutions to replace the question marks.
+    # There is test code and example output following most of the tasks that involve producing code.
+    # Uncomment the code in order to run the tests.
+    #
+    # At the end of the file, there is a question regarding the use of AI or other collaboration when working the tasks.
+    # Please remember to answer the AI question. And finally, don't forget to submit your solutions to Moodle.
+
+
+    # Some resources that can help with the tasks in this exercise:
+    #
+    # - The tutorial notebook from our course: in the repository at: /ex1/Basics-of-using-Databricks-notebooks.ipynb
+    # - Chapter 3 in Learning Spark, 2nd Edition: https://learning.oreilly.com/library/view/learning-spark-2nd/9781492050032/
+    #     - There are additional code examples in the related GitHub repository: https://github.com/databricks/LearningSparkV2
+    #     - The book related notebooks can be imported to Databricks by choosing `import` in your workspace and using the URL
+    #       https://github.com/databricks/LearningSparkV2/blob/master/notebooks/LearningSparkv2.dbc
+    # - Databricks tutorial of using Spark DataFrames: https://docs.databricks.com/en/getting-started/dataframes.html
+    # - Apache Spark documentation on all available functions that can be used on DataFrames:
+    #   https://spark.apache.org/docs/3.5.6/sql-ref-functions.html
+    # The full Spark Python functions API listing for the functions package might have some additional functions listed that
+    # have not been updated in the documentation: https://spark.apache.org/docs/3.5.6/api/python/reference/pyspark.sql/functions.html
+
+    # In Databricks, the Spark session is created automatically, and you should not create it yourself.
+    spark: SparkSession = SparkSession \
+        .builder \
+        .appName("ex2-solution") \
+        .config("spark.driver.host", "localhost") \
+        .master("local") \
+        .getOrCreate()
+
+    # suppress informational log messages related to the inner working of Spark
+    spark.sparkContext.setLogLevel("WARN")
+
+
+
+    printTaskLine(1)
+    # Task 1 - First Spark task
+    #
+    # Create and display a DataFrame with your own data, similarly as was done in the tutorial notebook.
+    # Your data should have at least 3 columns and at least 5 rows.
+
+    __MISSING__IMPLEMENTATION__
+
+
+    # Example output:
+    # ===============
+    # +---------+------+-----------+
+    # |     Team|Titles|Appearances|
+    # +---------+------+-----------+
+    # |   Brazil|     5|         23|
+    # |  Germany|     4|         18|
+    # |    Italy|     4|         14|
+    # |Argentina|     3|         14|
+    # |   France|     2|         16|
+    # |  Uruguay|     2|         15|
+    # |  England|     1|         17|
+    # |    Spain|     1|         16|
+    # +---------+------+-----------+
+
+
+
+    printTaskLine(2)
+    # Task 2 - Loading CSV data
+    #
+    # The CSV file "numbers.csv" contains some data on how to spell numbers in different languages.
+    # The file is located in the "data/ex2/numbers" folder in the weekly-exercises repository.
+    #
+    # - Load the data from the file into a DataFrame (numberDF) and display it.
+    # - Calculate the number of rows in the DataFrame using numberDF.
+
+    numberDF: DataFrame = __MISSING__IMPLEMENTATION__
+
+    __MISSING__IMPLEMENTATION__
+
+
+    numberOfNumbers: int = __MISSING__IMPLEMENTATION__
+
+    print(f"Number of rows in the number DataFrame: {numberOfNumbers}")
+
+
+    # Example output:
+    # ===============
+    # +------+-------+---------+-------+------+-------+------+-------+
+    # |number|English|  Finnish|Swedish|German|Spanish|French|Italian|
+    # +------+-------+---------+-------+------+-------+------+-------+
+    # |     1|    one|     yksi|    ett|  eins|    uno|    un|    uno|
+    # |     2|    two|    kaksi|    twå|  zwei|    dos|  deux|    due|
+    # |     3|  three|    kolme|    tre|  drei|   tres| trois|    tre|
+    # |     4|   four|    neljä|   fyra|  vier| cuatro|quatre|quattro|
+    # |     5|   five|    viisi|    fem|  fünf|  cinco|  cinq| cinque|
+    # |     6|    six|    kuusi|    sex| sechs|   seis|   six|    sei|
+    # |     7|  seven|seitsemän|    sju|sieben|  siete|  sept|  sette|
+    # |     8|  eight|kahdeksan|   åtta|  acht|   ocho|  huit|   otto|
+    # |     9|   nine| yhdeksän|    nio|  neun|  nueve|  neuf|   nove|
+    # |    10|    ten| kymmenen|    tio|  zehn|   diez|   dix|  dieci|
+    # +------+-------+---------+-------+------+-------+------+-------+
+    #
+    # and
+    #
+    # Number of rows in the number DataFrame: 10
+
+
+
+    printTaskLine(3)
+    # Task 3 - Weather data and the first rows from DataFrame
+    #
+    # In the "data/ex2/weather" folder is file "nordics_weather.csv" that contains weather data from Finland, Sweden, and Norway in CSV format.
+    #
+    # The data is based on a dataset from Kaggle: https://www.kaggle.com/datasets/adamwurdits/finland-norway-and-sweden-weather-data-20152019
+    # The Kaggle page has further descriptions on the data and the units used in the data.
+    #
+    # Part 1:
+    # - Read the data from the CSV file into DataFrame called "weatherDF". Let Spark infer the schema for the data.
+    #   Note that the column separator in the CSV file is a semicolon (";") instead of the default comma.
+    # - Print out the schema of the created DataFrame. Study the schema and compare it to the data in the CSV file. Do they match?
+    #
+    # Part 2:
+    # - Fetch the first five rows of the weather data frame and print their contents.
+
+    weatherDF: DataFrame = __MISSING__IMPLEMENTATION__
+
+    # Code that prints out the schema for weatherDF
+    __MISSING__IMPLEMENTATION__
+
+
+    weatherSample: list[Row] = __MISSING__IMPLEMENTATION__
+
+    print("The first five rows of the weather data:")
+    print(*[list(row.asDict().values()) for row in weatherSample], sep="\n")  # prints each Row to its own line
+
+
+    # Example output:
+    # ===============
+    # root
+    # |-- country: string (nullable = true)
+    # |-- date: date (nullable = true)
+    # |-- temperature_avg: double (nullable = true)
+    # |-- temperature_min: double (nullable = true)
+    # |-- temperature_max: double (nullable = true)
+    # |-- precipitation: double (nullable = true)
+    # |-- snow_depth: double (nullable = true)
+    #
+    # and
+    #
+    # The first five rows of the weather data:
+    # ['Finland', datetime.date(2019, 12, 28), -9.107407407, -15.28888889, -4.703947368, 0.789265537, 116.4210526]
+    # ['Finland', datetime. date(2015, 4, 8), 4.025, 1.336129032, 6.196129032, 0.116666667, 486.5833333]
+    # ['Sweden', datetime.date(2018, 10, 20), 5.077777778, 1.241743119, 9.210550459, 0.885153584, 0.0]
+    # ['Finland', datetime.date(2016, 3, 7), -0.775, -2.065584416, 0.001315789, 2.122613065, 469.6315789]
+    # ['Sweden', datetime.date(2017, 11, 29), -1.355555556, -7.81146789, -3.817889908, 2.728667791, 103.3424658]
+
+
+
+    printTaskLine(4)
+    # Task 4 - Minimum and maximum
+    #
+    # Find the minimum and the maximum temperature from the whole weather data.
+
+    minTemp: float = __MISSING__IMPLEMENTATION__
+    maxTemp: float = __MISSING__IMPLEMENTATION__
+
+
+    print(f"Minimum temperature is {minTemp}")
+    print(f"Maximum temperature is {maxTemp}")
+
+
+    # Example output:
+    # ===============
+    # Minimum temperature is -29.63961039
+    # Maximum temperature is 30.56143791
+
+
+
+    printTaskLine(5)
+    # Task 5 - Adding columns
+    #
+    # Add new columns, "measurement_year" and "measurement_weekday", to the weather DataFrame and print out the schema for the new DataFrame.
+    #
+    # - The new "measurement_year" column should contain the year as an integer based on the value in column "date".
+    # - The new "measurement_weekday" column should contain an integer representing the weekday based on column "date".
+    #   (0 for Monday, 1 for Tuesday, 2 for Wednesday, ..., 6 for Sunday)
+
+    weatherDFWithNewColumns: DataFrame = __MISSING__IMPLEMENTATION__
+
+
+    # code that prints out the schema for weatherDFWithNewColumns
+    __MISSING__IMPLEMENTATION__
+
+
+    # Example output:
+    # ===============
+    # root
+    # |-- country: string (nullable = true)
+    # |-- date: date (nullable = true)
+    # |-- temperature_avg: double (nullable = true)
+    # |-- temperature_min: double (nullable = true)
+    # |-- temperature_max: double (nullable = true)
+    # |-- precipitation: double (nullable = true)
+    # |-- snow_depth: double (nullable = true)
+    # |-- measurement_year: integer (nullable = true)
+    # |-- measurement_weekday: integer (nullable = true)
+
+
+
+    printTaskLine(6)
+    # Task 6 - Aggregated DataFrame
+    #
+    # Find the minimum and the maximum temperature for each year.
+    #
+    # Sort the resulting DataFrame based on year so that the latest year is the first row in the DataFrame.
+
+    yearlyTemperatureDF: DataFrame = __MISSING__IMPLEMENTATION__
+
+    yearlyTemperatureDF.show()
+
+
+    #/ Example output:
+    #/ ===============
+    #/ +----+---------------+---------------+
+    #/ |year|temperature_min|temperature_max|
+    #/ +----+---------------+---------------+
+    #/ |2019|   -26.63708609|    29.47627907|
+    #/ |2018|   -24.00592105|    30.56143791|
+    #/ |2017|        -24.922|    23.14771242|
+    #/ |2016|   -29.63961039|    26.28026906|
+    #/ |2015|   -21.97961783|     25.7285124|
+    #/ +----+---------------+---------------+
+
+
+
+    printTaskLine(7)
+    # Task 7 - Average measurements in Finland
+    #
+    # Using the weather data, find out the average precipitation (in cm) and
+    # the average snow depth (in mm) for each week day in Finland in year 2017.
+    # Round both of the averages to 2 decimals.
+
+    avgFinlandDF: DataFrame = __MISSING__IMPLEMENTATION__
+
+    avgFinlandDF.show()
+
+
+    # Example output:
+    # ===============
+    # +-------+-----------------+--------------+
+    # |weekday|precipitation_avg|snow_depth_avg|
+    # +-------+-----------------+--------------+
+    # |      0|             1.61|        213.49|
+    # |      1|             2.19|         222.1|
+    # |      2|             1.63|        217.13|
+    # |      3|             1.99|        222.12|
+    # |      4|             1.45|        214.12|
+    # |      5|             1.84|        222.39|
+    # |      6|             1.73|        212.79|
+    # +-------+-----------------+--------------+
+
+
+
+    printTaskLine(8)
+    # Task 8 - Scaling in data engineering
+    #
+    # Using your own words, answer the following questions:
+    #
+    # 1. What is meant by "scaling" in the context of data engineering?
+    # 2. What is the difference between horizontal and vertical scaling?
+    # 3. What benefits can be achieved by scaling?
+    # 4. What kind of problems can be encountered related to scaling?
+    #
+    # Extensive answers are not required here.
+    # If your answers do not fit into one screen, you have likely written more than what was expected.
+
+    # ???
+
+
+
+    printAIQuestionTaskLine()
+    # Use of AI and collaboration
+    #
+    # Using AI and collaborating with other students is allowed when doing the weekly exercises.
+    # However, the AI use and collaboration should be documented.
+    #
+    # - Did you use AI tools while doing this exercise?
+    #   - Did they help? And how did they help?
+    # - Did you work with other students to complete the tasks?
+    #   - Only extensive collaboration is expected to be reported. If you only got help
+    #     for a couple of the tasks, you don't need to report it here.
+
+    # ???
+
+
+
+    # Typically, at the end you would stop the Spark session to free up resources.
+    # DO NOT do this in Databricks! It will restart the entire cluster for all users.
+    # (that is why it is commented out here too, getting to the end will stop the session automatically)
+    # spark.stop()
+
+
+
+# Helper function to separate the task outputs from each other
+def printTaskLine(taskNumber: int) -> None:
+    print(f"======\nTask {taskNumber}\n======")
+
+def printAIQuestionTaskLine() -> None:
+    print("======\nAI and collaboration\n======")
+
+
+
+if __name__ == "__main__":
+    main()

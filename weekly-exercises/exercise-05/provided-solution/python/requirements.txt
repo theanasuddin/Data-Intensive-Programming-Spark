@@ -1,0 +1,4 @@
+matplotlib==3.10.7
+numpy==2.3.4
+pyspark==3.5.3
+setuptools==80.9.0

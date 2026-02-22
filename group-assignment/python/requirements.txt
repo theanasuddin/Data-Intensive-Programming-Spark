@@ -1,0 +1,5 @@
+delta-spark==4.0.0
+numpy==2.3.4
+# use pyspark 4 to get native support for XML files for advanced task 2
+pyspark==4.0.1
+setuptools==80.9.0
